@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server"
 
-const sampleEvents = [
+type EventItem = {
+  id: string
+  title: string
+  date: string
+  time: string
+  description: string
+}
+
+const sampleEvents: EventItem[] = [
   {
     id: "1",
     title: "Riunione progetto",
@@ -20,7 +28,7 @@ const sampleEvents = [
     title: "Workshop n8n",
     date: "2026-05-18",
     time: "11:00",
-    description: "Sessione pratica per collegare l&apos;agenda a n8n.",
+    description: "Sessione pratica per collegare l'agenda a n8n.",
   },
   {
     id: "4",
@@ -38,6 +46,32 @@ const sampleEvents = [
   },
 ]
 
-export async function GET() {
-  return NextResponse.json({ events: sampleEvents })
+let currentEvents: EventItem[] = sampleEvents
+
+function badRequest(message: string) {
+  return NextResponse.json({ error: message }, { status: 400 })
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url)
+  const date = url.searchParams.get("date")
+  const events = date ? currentEvents.filter((item) => item.date === date) : currentEvents
+  return NextResponse.json({ events })
+}
+
+export async function POST(request: Request) {
+  let payload: { events?: EventItem[] }
+
+  try {
+    payload = await request.json()
+  } catch {
+    return badRequest("Richiesta JSON non valida")
+  }
+
+  if (!payload?.events || !Array.isArray(payload.events)) {
+    return badRequest("Invia un body JSON con { events: [...] }")
+  }
+
+  currentEvents = payload.events
+  return NextResponse.json({ status: "ok", total: currentEvents.length })
 }
