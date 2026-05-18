@@ -1,0 +1,56 @@
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Output folders
+.next/
+out/
+.build/
+.dist/
+.turbo/
+coverage/
+
+# Local environment files
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pnpm-debug.log.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# TypeScript
+*.tsbuildinfo
+
+# JetBrains
+/.idea
+
+# Misc
+*.log
+
+# pnpm store / caches
+.pnpm-store/
+**/.cache
+
+# Generated lockfiles or temporary files
+package-lock.json
+
+# Next.js build output
+apps/web/.next/
+apps/web/out/
