@@ -33,6 +33,18 @@ function getMonthLabel(date: Date) {
   return date.toLocaleString("it-IT", { month: "long", year: "numeric" })
 }
 
+function formatDate(date: Date) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+function parseIsoDateLocal(iso: string) {
+  const [y, m, d] = iso.split("-").map((v) => Number(v))
+  return new Date(y, m - 1, d)
+}
+
 function getCalendarDays(month: Date): CalendarDay[] {
   const firstDay = new Date(month.getFullYear(), month.getMonth(), 1)
   const lastDay = new Date(month.getFullYear(), month.getMonth() + 1, 0)
@@ -47,23 +59,238 @@ function getCalendarDays(month: Date): CalendarDay[] {
   for (let index = 0; index < totalDays; index += 1) {
     const current = new Date(startDay)
     current.setDate(startDay.getDate() + index)
-    const iso = current.toISOString().slice(0, 10)
+    const iso = formatDate(current)
 
     calendar.push({
       iso,
       label: current.getDate(),
       isCurrentMonth: current.getMonth() === month.getMonth(),
-      isToday: iso === new Date().toISOString().slice(0, 10),
+      isToday: iso === formatDate(new Date()),
     })
   }
 
   return calendar
 }
 
+function extractReplyFromPayload(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    return payload
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return null
+  }
+
+  const candidate = payload as Record<string, unknown>
+  const directKeys = ["reply", "message", "output", "text", "response", "answer"]
+
+  for (const key of directKeys) {
+    if (typeof candidate[key] === "string") {
+      return candidate[key] as string
+    }
+  }
+
+  if (candidate.data && typeof candidate.data === "object") {
+    const nested = candidate.data as Record<string, unknown>
+    for (const key of directKeys) {
+      if (typeof nested[key] === "string") {
+        return nested[key] as string
+      }
+    }
+  }
+
+  return null
+}
+
+function parseEventsFromWebhook(payload: unknown, selectedDate: string): EventItem[] {
+  const items: any[] = []
+
+  if (Array.isArray(payload)) {
+    items.push(...payload)
+  } else if (payload && typeof payload === "object") {
+    const p = payload as Record<string, unknown>
+    if (Array.isArray(p.events)) items.push(...(p.events as any[]))
+    else if (Array.isArray(p.items)) items.push(...(p.items as any[]))
+    else if (Array.isArray(p.data)) items.push(...(p.data as any[]))
+    else if (Array.isArray(p.body)) items.push(...(p.body as any[]))
+    else if (Array.isArray(p.results)) items.push(...(p.results as any[]))
+    else if (Array.isArray(p.records)) items.push(...(p.records as any[]))
+    else items.push(p)
+  }
+
+  return items.map((raw, idx) => {
+    const title = raw?.title ?? raw?.summary ?? raw?.name ?? raw?.subject ?? "Evento"
+    const description = raw?.description ?? raw?.desc ?? raw?.details ?? raw?.body ?? ""
+
+    let startRaw: any = undefined
+    let endRaw: any = undefined
+
+    if (raw?.start) {
+      startRaw = raw.start.dateTime ?? raw.start.date ?? raw.start
+    } else if (raw?.startDateTime) {
+      startRaw = raw.startDateTime
+    } else if (raw?.start_time) {
+      startRaw = raw.start_time
+    } else if (raw?.from) {
+      startRaw = raw.from
+    }
+
+    if (raw?.end) {
+      endRaw = raw.end.dateTime ?? raw.end.date ?? raw.end
+    } else if (raw?.endDateTime) {
+      endRaw = raw.endDateTime
+    } else if (raw?.end_time) {
+      endRaw = raw.end_time
+    } else if (raw?.to) {
+      endRaw = raw.to
+    }
+
+    let time = ""
+
+    try {
+      if (typeof startRaw === "string" && startRaw.includes("T")) {
+        const s = new Date(startRaw)
+        const startTime = s.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+        if (typeof endRaw === "string" && endRaw.includes("T")) {
+          const e = new Date(endRaw)
+          const endTime = e.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+          time = `${startTime} - ${endTime}`
+        } else {
+          time = startTime
+        }
+      } else if (typeof startRaw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(startRaw)) {
+        time = "Tutto il giorno"
+      } else {
+        time = raw?.time ?? raw?.hour ?? ""
+      }
+    } catch {
+      time = raw?.time ?? ""
+    }
+
+    const id = raw?.id ?? raw?.eventId ?? `${selectedDate}-${idx}-${String(title).slice(0, 20)}`
+
+    return {
+      id: String(id),
+      title: String(title),
+      date: selectedDate,
+      time: String(time),
+      description: String(description ?? ""),
+    }
+  })
+}
+
+function extractItemsFromPayload(payload: unknown): any[] {
+  const items: any[] = []
+
+  if (Array.isArray(payload)) {
+    items.push(...payload)
+  } else if (payload && typeof payload === "object") {
+    const p = payload as Record<string, unknown>
+    if (Array.isArray(p.events)) items.push(...(p.events as any[]))
+    else if (Array.isArray(p.items)) items.push(...(p.items as any[]))
+    else if (Array.isArray(p.data)) items.push(...(p.data as any[]))
+    else if (Array.isArray(p.body)) items.push(...(p.body as any[]))
+    else if (Array.isArray(p.results)) items.push(...(p.results as any[]))
+    else if (Array.isArray(p.records)) items.push(...(p.records as any[]))
+    else items.push(p)
+  }
+
+  return items
+}
+
+function getEventDateForComparison(ev: any): string | null {
+  if (!ev) return null
+
+  // Prefer Google-like shape: ev.start.dateTime or ev.start.date
+  const start = ev?.start
+  if (start && typeof start === "object") {
+    const dt = start.dateTime ?? start.dateTime
+    if (typeof dt === "string" && dt.length >= 10) return dt.slice(0, 10)
+    const d = start.date
+    if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d
+  }
+
+  // Common fallbacks
+  if (typeof ev?.startDateTime === "string" && ev.startDateTime.length >= 10) return ev.startDateTime.slice(0, 10)
+  if (typeof ev?.dateTime === "string" && ev.dateTime.length >= 10) return ev.dateTime.slice(0, 10)
+  if (typeof ev?.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(ev.date)) return ev.date
+
+  return null
+}
+
+function normalizeEvent(raw: any, fallbackDate?: string): EventItem {
+  const title = raw?.title ?? raw?.summary ?? raw?.name ?? raw?.subject ?? "Evento"
+  const description = raw?.description ?? raw?.desc ?? raw?.details ?? raw?.body ?? ""
+
+  // determine start and end values
+  const startObj = raw?.start ?? raw?.startDateTime ?? raw?.start_time ?? raw?.from ?? raw?.start
+  const endObj = raw?.end ?? raw?.endDateTime ?? raw?.end_time ?? raw?.to ?? raw?.end
+
+  // helper to get local YYYY-MM-DD from various inputs
+  function localDateFrom(value: any) {
+    if (!value) return null
+    if (typeof value === "string") {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        // already YYYY-MM-DD
+        return value
+      }
+      // ISO date-time or other parseable string
+      const d = new Date(value)
+      if (!isNaN(d.getTime())) return formatDate(d)
+      return null
+    }
+    if (typeof value === "object") {
+      if (typeof value.date === "string") return localDateFrom(value.date)
+      if (typeof value.dateTime === "string") return localDateFrom(value.dateTime)
+    }
+    return null
+  }
+
+  const eventDate = localDateFrom(raw?.date) ?? localDateFrom(startObj) ?? fallbackDate ?? formatDate(new Date())
+
+  // compute time display
+  let time = ""
+  try {
+    const startStr = typeof startObj === "string" ? startObj : startObj?.dateTime ?? startObj?.date
+    const endStr = typeof endObj === "string" ? endObj : endObj?.dateTime ?? endObj?.date
+
+    if (typeof startStr === "string" && startStr.includes("T")) {
+      const s = new Date(startStr)
+      const startTime = s.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+      if (typeof endStr === "string" && endStr.includes("T")) {
+        const e = new Date(endStr)
+        const endTime = e.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })
+        time = `${startTime} - ${endTime}`
+      } else {
+        time = startTime
+      }
+    } else if (typeof startStr === "string" && /^\d{4}-\d{2}-\d{2}$/.test(startStr)) {
+      time = "Tutto il giorno"
+    } else {
+      time = raw?.time ?? raw?.hour ?? ""
+    }
+  } catch {
+    time = raw?.time ?? ""
+  }
+
+  const id = raw?.id ?? raw?.eventId ?? raw?.iCalUID ?? `${eventDate}-${String(title).slice(0, 20)}`
+
+  return {
+    id: String(id),
+    title: String(title),
+    date: String(eventDate),
+    time: String(time),
+    description: String(description ?? ""),
+  }
+}
+
 export default function Page() {
   const [events, setEvents] = React.useState<EventItem[]>([])
   const [loading, setLoading] = React.useState(false)
-  const [selectedDate, setSelectedDate] = React.useState(() => new Date().toISOString().slice(0, 10))
+  const [dayEvents, setDayEvents] = React.useState<EventItem[]>([])
+  const [dayEventsRaw, setDayEventsRaw] = React.useState<any[]>([])
+  const [eventsError, setEventsError] = React.useState<string | null>(null)
+  const [selectedDate, setSelectedDate] = React.useState(() => formatDate(new Date()))
   const [currentMonth, setCurrentMonth] = React.useState(new Date())
   const [chatMessages, setChatMessages] = React.useState<ChatMessage[]>([
     {
@@ -79,29 +306,68 @@ export default function Page() {
 
   React.useEffect(() => {
     async function loadEvents() {
-      setLoading(true)
       try {
         const response = await fetch("/api/events")
         const data = await response.json()
         setEvents(data.events ?? [])
-      } finally {
-        setLoading(false)
+      } catch (err) {
+        // keep existing sample data behavior; don't block the UI
+        console.error("Failed to load /api/events:", err)
       }
     }
 
     loadEvents()
   }, [])
 
+  React.useEffect(() => {
+    const controller = new AbortController()
+
+    async function loadDayEvents() {
+      setLoading(true)
+      setEventsError(null)
+      setDayEvents([])
+
+      try {
+        const webhookUrl = process.env.NEXT_PUBLIC_N8N_EVENTS_WEBHOOK_URL ?? "http://localhost:5678/webhook/9ec33ed2-1e15-4d26-ac04-2806952d5586"
+        const url = new URL(webhookUrl)
+        url.searchParams.set("date", selectedDate)
+
+        const response = await fetch(url.toString(), { signal: controller.signal })
+
+        if (!response.ok) {
+          const details = await response.text()
+          throw new Error(details || `Webhook returned ${response.status}`)
+        }
+
+        const contentType = response.headers.get("content-type") ?? ""
+        const payload = contentType.includes("application/json") ? await response.json() : await response.text()
+
+        const rawItems = extractItemsFromPayload(payload)
+        setDayEventsRaw(rawItems)
+
+        const parsed = parseEventsFromWebhook(payload, selectedDate)
+        setDayEvents(parsed)
+      } catch (err: any) {
+        if (err?.name === "AbortError") return
+        console.error("Failed to load day events:", err)
+        setEventsError(err?.message ?? "Errore durante il caricamento degli impegni")
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadDayEvents()
+
+    return () => controller.abort()
+  }, [selectedDate])
+
   const calendarDays = React.useMemo(() => getCalendarDays(currentMonth), [currentMonth])
 
-  const eventsByDate = React.useMemo(() => {
-    return events.reduce<Record<string, EventItem[]>>((group, event) => {
-      group[event.date] = [...(group[event.date] ?? []), event]
-      return group
-    }, {})
-  }, [events])
-
-  const selectedEvents = eventsByDate[selectedDate] ?? []
+  const selectedEvents = React.useMemo(() => {
+    const serverMatches = events.filter((ev) => ev.date === selectedDate).map((ev) => normalizeEvent(ev, selectedDate))
+    const webhookMatches = dayEventsRaw.filter((ev) => getEventDateForComparison(ev) === selectedDate).map((ev) => normalizeEvent(ev, selectedDate))
+    return [...serverMatches, ...webhookMatches]
+  }, [events, dayEventsRaw, selectedDate])
 
   React.useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
@@ -118,7 +384,7 @@ export default function Page() {
   function goToToday() {
     const today = new Date()
     setCurrentMonth(new Date(today.getFullYear(), today.getMonth(), 1))
-    setSelectedDate(today.toISOString().slice(0, 10))
+    setSelectedDate(formatDate(today))
   }
 
   async function onSubmitChat(event: React.FormEvent<HTMLFormElement>) {
@@ -147,28 +413,64 @@ export default function Page() {
     setChatLoading(true)
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ message, history }),
-      })
+      const webhookUrl = process.env.NEXT_PUBLIC_N8N_CHAT_WEBHOOK_URL
 
-      const data = await response.json()
+      if (webhookUrl) {
+        const upstreamResponse = await fetch(webhookUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message, history }),
+        })
 
-      if (!response.ok) {
-        throw new Error(data?.error ?? "Errore durante la chiamata chat")
+        if (!upstreamResponse.ok) {
+          const details = await upstreamResponse.text()
+          throw new Error(details || "Webhook n8n non disponibile")
+        }
+
+        const contentType = upstreamResponse.headers.get("content-type") ?? ""
+        const upstreamPayload = contentType.includes("application/json")
+          ? await upstreamResponse.json()
+          : await upstreamResponse.text()
+        const reply = extractReplyFromPayload(upstreamPayload)
+
+        if (!reply) {
+          throw new Error("Il webhook n8n ha risposto ma senza un testo riconoscibile")
+        }
+
+        setChatMessages((previous) => [
+          ...previous,
+          {
+            id: `assistant-${Date.now()}`,
+            role: "assistant",
+            content: reply,
+          },
+        ])
+      } else {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message, history }),
+        })
+
+        const data = await response.json()
+
+        if (!response.ok) {
+          throw new Error(data?.error ?? "Errore durante la chiamata chat")
+        }
+
+        setChatMessages((previous) => [
+          ...previous,
+          {
+            id: `assistant-${Date.now()}`,
+            role: "assistant",
+            content: typeof data.reply === "string" ? data.reply : "Risposta non disponibile.",
+          },
+        ])
       }
-
-      setChatMessages((previous) => [
-        ...previous,
-        {
-          id: `assistant-${Date.now()}`,
-          role: "assistant",
-          content: typeof data.reply === "string" ? data.reply : "Risposta non disponibile.",
-        },
-      ])
     } catch (error) {
       const fallbackMessage = error instanceof Error ? error.message : "Errore sconosciuto"
       setChatError(fallbackMessage)
@@ -244,7 +546,10 @@ export default function Page() {
 
                 <div className="mt-2 grid grid-cols-7 gap-2 text-sm">
                   {calendarDays.map((day) => {
-                    const dayEvents = eventsByDate[day.iso] ?? []
+                    const currentDay = day.iso
+                    const serverMatches = events.filter((ev) => ev.date === currentDay).map((ev) => normalizeEvent(ev, currentDay))
+                    const webhookMatches = dayEventsRaw.filter((ev) => getEventDateForComparison(ev) === currentDay).map((ev) => normalizeEvent(ev, currentDay))
+                    const cellEvents = [...serverMatches, ...webhookMatches]
                     const isSelected = selectedDate === day.iso
                     return (
                       <button
@@ -260,15 +565,15 @@ export default function Page() {
                         }`}>
                           {day.label}
                         </span>
-                        {dayEvents.length > 0 && (
+                        {cellEvents.length > 0 && (
                           <div className="flex items-center gap-0.5">
-                            {dayEvents.slice(0, 3).map((_, i) => (
+                            {cellEvents.slice(0, 3).map((_, i) => (
                               <span key={i} className={`size-1.5 rounded-full ${
                                 isSelected ? "bg-sky-300" : "bg-sky-400/80"
                               }`} />
                             ))}
-                            {dayEvents.length > 3 && (
-                              <span className="text-[9px] leading-none text-sky-400/80">+{dayEvents.length - 3}</span>
+                            {cellEvents.length > 3 && (
+                              <span className="text-[9px] leading-none text-sky-400/80">+{cellEvents.length - 3}</span>
                             )}
                           </div>
                         )}
@@ -283,7 +588,7 @@ export default function Page() {
                   <div className="mb-5 flex items-center justify-between gap-4">
                     <div>
                       <p className="text-sm uppercase tracking-[0.24em] text-slate-200">Impegni</p>
-                      <h3 className="text-xl font-semibold text-white">{new Date(selectedDate).toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" })}</h3>
+                      <h3 className="text-xl font-semibold text-white">{parseIsoDateLocal(selectedDate).toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" })}</h3>
                     </div>
                     <span className="rounded-full bg-slate-950/70 px-3 py-1 text-xs text-slate-200">
                       {selectedEvents.length} {selectedEvents.length === 1 ? "evento" : "eventi"}
@@ -291,7 +596,9 @@ export default function Page() {
                   </div>
 
                   <div className="space-y-4">
-                    {loading ? (
+                    {eventsError ? (
+                      <div className="rounded-3xl border border-rose-600/20 bg-rose-950/10 p-6 text-center text-sm text-rose-300">Errore: {eventsError}</div>
+                    ) : loading ? (
                       <div className="rounded-3xl border border-white/15 bg-slate-950/80 p-6 text-center text-sm text-slate-200">Caricamento impegni…</div>
                     ) : selectedEvents.length ? (
                       selectedEvents.map((event) => (
